@@ -187,7 +187,7 @@ def clasificar(m):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  CORRECCIÓN — VERSIÓN MEJORADA
+#  CORRECCIÓN — VERSIÓN MEJORADA ✓
 # ═══════════════════════════════════════════════════════════════
 
 def _gamma_clahe(img, gamma, clahe_clip, tile):
@@ -214,7 +214,7 @@ def _estimar_psf(img, longitud):
 def _wiener(img, psf, balance):
     """
     ✓ MEJORADO: Deconvolución Wiener con padding reflexivo.
-    - Padding circular (reflect) elimina artefactos de borde
+    - Padding reflexivo (reflect) elimina artefactos de borde
     - Balance adaptativo 100x mayor para radiografía médica
     - Normalización segura de valores finales
     """
@@ -807,7 +807,7 @@ with st.sidebar:
                         unsafe_allow_html=True)
 
 
-# ═══════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════��══════════
 #  PROCESAMIENTO
 # ═══════════════════════════════════════════════════════════════
 
@@ -834,7 +834,7 @@ if archivo and analizar:
 
 # ═══════════════════════════════════════════════════════════════
 #  EXPORTAR
-# ═══════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════��══════════════════
 
 if exportar and st.session_state.ok:
     m      = st.session_state.m
@@ -871,11 +871,11 @@ if not st.session_state.ok:
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.markdown('<div class="panel"><div class="panel-header">Fase 1 — Diagnóstico</div><div class="panel-body" style="font-size:12px;color:#718096;line-height:1.7">Calcula 8 métricas cua[...]
+        st.markdown(<div class="panel"><div class="panel-header">Fase 1 — Diagnóstico</div><div class="panel-body" style="font-size:12px;color:#718096;line-height:1.7">Calcula 8 métricas cuantitativas (Laplaciano, SNR, Entropía, etc.) para detectar automáticamente sobreexposición y blur en radiografías.</div></div>', unsafe_allow_html=True)
     with c2:
-        st.markdown('<div class="panel"><div class="panel-header">Fase 2 — Corrección</div><div class="panel-body" style="font-size:12px;color:#718096;line-height:1.7">Aplica Gamma + CLAHE par[...]
+        st.markdown(<div class="panel"><div class="panel-header">Fase 2 — Corrección</div><div class="panel-body" style="font-size:12px;color:#718096;line-height:1.7">Aplica Gamma + CLAHE para sobreexposición, y Wiener/Unsharp para blur. Genera imagen corregida optimizada.</div></div>', unsafe_allow_html=True)
     with c3:
-        st.markdown('<div class="panel"><div class="panel-header">Reporte</div><div class="panel-body" style="font-size:12px;color:#718096;line-height:1.7">Genera dashboard comparativo con 8 KPIs[...]
+        st.markdown(<div class="panel"><div class="panel-header">Reporte</div><div class="panel-body" style="font-size:12px;color:#718096;line-height:1.7">Genera dashboard comparativo con 8 KPIs antes/después, histogramas, y análisis detallado descargable.</div></div>', unsafe_allow_html=True)
 
 else:
     m        = st.session_state.m
@@ -1074,7 +1074,7 @@ else:
             st.markdown(f"""
             <div class="crit-box {'ok' if apta_post else 'danger'}">
                 <div class="crit-title">{'✓ Apta post-corrección' if apta_post else '✗ No apta post-corrección'}</div>
-                <div class="crit-detail">{'Todas las métricas están dentro del rango aceptable tras la corrección.' if apta_post else 'Algunas métricas siguen fuera del rango. Revisar imagen[...]
+                <div class="crit-detail">{'Todas las métricas están dentro del rango aceptable tras la corrección.' if apta_post else 'Algunas métricas siguen fuera del rango. Revisar imagen.'}</div>
             </div>""", unsafe_allow_html=True)
 
     with tab_rep:
