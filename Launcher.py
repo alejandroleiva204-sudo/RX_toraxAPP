@@ -1062,7 +1062,7 @@ else:
             </div>""", unsafe_allow_html=True)
 
     # ── Tab 4: Reporte ────────────────────────────────────────
-    with tab_rep:
+ with tab_rep:
         dx_str = dx["final"] if (tiene_sobrex or tiene_blur) else "APTA PARA DIAGNÓSTICO"
         dx_fin = clasificar(m_corr)["final"] if m_corr else dx_str
         txt    = reporte_txt(m, m_corr, dx, dx_fin, nombre)
@@ -1072,6 +1072,5 @@ else:
             txt.encode("utf-8"),
             f"reporte_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
             "text/plain",
-        )}.txt",
-            "text/plain",
         )
+ 
