@@ -1072,6 +1072,6 @@ else:
             txt.encode("utf-8"),
             f"reporte_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
             "text/plain",
-        ))}.txt",
+        )}.txt",
             "text/plain",
         )
