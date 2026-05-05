@@ -139,13 +139,18 @@ def _severidad_sobrex(m):
             return sev, params
     return "leve", NIVELES_SOBREX[2][1]
 
-
 def _severidad_blur(m):
-    for sev, params, cond in NIVELES_BLUR:
-        if cond(m):
-            return sev, params
-    return "leve", NIVELES_BLUR[2][1]
-
+    # Verificar severidad severa primero (más restrictivo)
+    if m["laplaciano"] < 20 and m["snr"] < 10:
+        return "severa", NIVELES_BLUR[0][1]
+    # Luego moderada
+    elif m["laplaciano"] < 50 and m["snr"] < 15:
+        return "moderada", NIVELES_BLUR[1][1]
+    # Si hay entropía baja pero no cumple los anteriores, es leve
+    elif m["entropia"] < UMBRAL_BLUR["entropia"]:
+        return "leve", NIVELES_BLUR[2][1]
+    # Sin blur
+    return None, None
 
 def clasificar(m):
     """Evalúa sobreexposición y blur de forma INDEPENDIENTE."""
@@ -153,7 +158,7 @@ def clasificar(m):
     c_blur, blur_ok = _criterios_blur(m)
 
     tiene_sobrex = len(c_sobrex) >= 2
-    tiene_blur   = blur_ok
+    tiene_blur   = blur_ok  # Requiere que se cumplan los 3 criterios
 
     resultado = {
         "sobrex": None,
@@ -176,6 +181,7 @@ def clasificar(m):
             "params":    params,
             "criterios": c_blur,
         }
+        
 
     if tiene_sobrex or tiene_blur:
         partes = []
