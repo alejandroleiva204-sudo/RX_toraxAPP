@@ -42,7 +42,7 @@ UMBRAL_SOBREX = {
 UMBRAL_BLUR = {
     "laplaciano":  100.0,
     "snr":          20.0,
-    "entropia":      6.5,
+    "entropia":      7.0,
 }
 
 # ── Severidad sobreexposición ─────────────────────────────────
@@ -69,7 +69,21 @@ NIVELES_BLUR = [
 # ═══════════════════════════════════════════════════════════════
 #  PREPROCESAMIENTO
 # ═══════════════════════════════════════════════════════════════
-
+def recortar_roi(img):
+    # Umbraliza para encontrar la región brillante (la RX)
+    _, mask = cv2.threshold(img, 15, 255, cv2.THRESH_BINARY)
+    coords  = cv2.findNonZero(mask)
+    if coords is None:
+        return img
+    x, y, w, h = cv2.boundingRect(coords)
+    # Margen de seguridad
+    margin = 10
+    x = max(0, x - margin)
+    y = max(0, y - margin)
+    w = min(img.shape[1] - x, w + 2 * margin)
+    h = min(img.shape[0] - y, h + 2 * margin)
+    return img[y:y+h, x:x+w]
+    
 def preprocesar(img_bgr, sigma=1.0, target_size=None):
     img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY) if len(img_bgr.shape) == 3 else img_bgr.copy()
     img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
@@ -127,7 +141,7 @@ def _criterios_blur(m):
     if flags["snr"]: activos.append(f"SNR={m['snr']:.1f} dB < {UMBRAL_BLUR['snr']} dB")
     if flags["ent"]: activos.append(f"Entropía={m['entropia']:.2f} < {UMBRAL_BLUR['entropia']}")
     # Blur confirmado solo si los 3 se activan
-    confirmado = all(flags.values())
+    confirmado = flags["lap"] and flags["snr"]
     return activos, confirmado
 
 
