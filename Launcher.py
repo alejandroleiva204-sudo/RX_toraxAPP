@@ -869,14 +869,31 @@ if not st.session_state.ok:
     </div>
     """, unsafe_allow_html=True)
 
-    c1, c2, c3 = st.columns(3)
+       c1, c2, c3 = st.columns(3)
     with c1:
-        st.markdown(<div class="panel"><div class="panel-header"> Fase 1  Diagnóstico</div><div class="panel-body" style="font-size:12px;color:#718096;line-height:1.7">Calcula 8 métricas cuantitativas (Laplaciano, SNR, Entropía, etc.) para detectar automáticamente sobreexposición y blur en radiografías.</div></div>, unsafe_allow_html=True)
+        st.markdown("""
+        <div class="panel">
+            <div class="panel-header">🔍 Fase 1 — Diagnóstico</div>
+            <div class="panel-body" style="font-size:12px;color:#718096;line-height:1.7">
+                Calcula 8 métricas cuantitativas (Laplaciano, SNR, Entropía, etc.) para detectar automáticamente sobreexposición y blur en radiografías.
+            </div>
+        </div>""", unsafe_allow_html=True)
     with c2:
-        st.markdown(<div class="panel"><div class="panel-header"> Fase 2  Corrección</div><div class="panel-body" style="font-size:12px;color:#718096;line-height:1.7">Aplica Gamma + CLAHE para sobreexposición, y Wiener/Unsharp para blur. Genera imagen corregida optimizada.</div></div>, unsafe_allow_html=True)
+        st.markdown("""
+        <div class="panel">
+            <div class="panel-header">🔧 Fase 2 — Corrección</div>
+            <div class="panel-body" style="font-size:12px;color:#718096;line-height:1.7">
+                Aplica Gamma + CLAHE para sobreexposición y Wiener + Unsharp para blur. Genera versión optimizada.
+            </div>
+        </div>""", unsafe_allow_html=True)
     with c3:
-        st.markdown(<div class="panel"><div class="panel-header">Reporte</div><div class="panel-body" style="font-size:12px;color:#718096;line-height:1.7">Genera dashboard comparativo con 8 KPIs antes/después, histogramas, y análisis detallado descargable.</div></div>, unsafe_allow_html=True)
-
+        st.markdown("""
+        <div class="panel">
+            <div class="panel-header">📊 Reporte</div>
+            <div class="panel-body" style="font-size:12px;color:#718096;line-height:1.7">
+                Genera dashboard comparativo con 8 KPIs antes/después. Descarga reportes en texto (.txt).
+            </div>
+        </div>""", unsafe_allow_html=True)
 else:
     m        = st.session_state.m
     m_corr   = st.session_state.m_corr
