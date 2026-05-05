@@ -22,30 +22,21 @@ warnings.filterwarnings("ignore")
 
 # ═══════════════════════════════════════════════════════════════
 #  UMBRALES DE CLASIFICACIÓN
-#  Cada artefacto se evalúa de forma independiente.
-#  Una imagen puede tener sobreexposición, blur, ambos o ninguno.
 # ═══════════════════════════════════════════════════════════════
 
-# ── Sobreexposición ───────────────────────────────────────────
-# Métricas que el blur NO distorsiona igual que la sobreexposición.
-# Se necesitan al menos 2 criterios activos para confirmar.
 UMBRAL_SOBREX = {
-    "media":       160.0,   # intensidad media
-    "saturacion":    2.0,   # % px >= 250
-    "kurtosis":     -0.5,   # distribución aplastada
-    "px_oscuros":   25.0,   # % px < 30 (imagen "lavada")
+    "media":       160.0,
+    "saturacion":    2.0,
+    "kurtosis":     -0.5,
+    "px_oscuros":   25.0,
 }
 
-# ── Blur ─────────────────────────────────────────────────────
-# Los tres criterios deben activarse juntos para confirmar blur.
-# El Laplaciano solo NO es suficiente (se sesga por sobreexposición).
 UMBRAL_BLUR = {
     "laplaciano":  100.0,
     "snr":          20.0,
     "entropia":      7.0,
 }
 
-# ── Severidad sobreexposición ─────────────────────────────────
 NIVELES_SOBREX = [
     ("severa",   {"gamma": 0.40, "clahe_clip": 8.0, "tile": (8, 8)},
      lambda m: m["kurtosis"] < -0.9 or (m["media"] > 200 and m["saturacion"] > 20)),
@@ -55,7 +46,6 @@ NIVELES_SOBREX = [
      lambda m: True),
 ]
 
-# ── Severidad blur ────────────────────────────────────────────
 NIVELES_BLUR = [
     ("severa",   {"metodo": "wiener", "balance": 0.0001, "sharpen_post": True},
      lambda m: m["laplaciano"] < 20  and m["snr"] < 10),
@@ -70,13 +60,11 @@ NIVELES_BLUR = [
 #  PREPROCESAMIENTO
 # ═══════════════════════════════════════════════════════════════
 def recortar_roi(img):
-    # Umbraliza para encontrar la región brillante (la RX)
     _, mask = cv2.threshold(img, 15, 255, cv2.THRESH_BINARY)
     coords  = cv2.findNonZero(mask)
     if coords is None:
         return img
     x, y, w, h = cv2.boundingRect(coords)
-    # Margen de seguridad
     margin = 10
     x = max(0, x - margin)
     y = max(0, y - margin)
@@ -115,7 +103,7 @@ def calcular_metricas(img, nombre="imagen"):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  CLASIFICACIÓN DUAL E INDEPENDIENTE
+#  CLASIFICACIÓN
 # ═══════════════════════════════════════════════════════════════
 
 def _criterios_sobrex(m):
@@ -140,8 +128,8 @@ def _criterios_blur(m):
     if flags["lap"]: activos.append(f"Lap={m['laplaciano']:.1f} < {UMBRAL_BLUR['laplaciano']}")
     if flags["snr"]: activos.append(f"SNR={m['snr']:.1f} dB < {UMBRAL_BLUR['snr']} dB")
     if flags["ent"]: activos.append(f"Entropía={m['entropia']:.2f} < {UMBRAL_BLUR['entropia']}")
-    # Blur confirmado solo si los 3 se activan
-    confirmado = flags["lap"] and flags["snr"]
+    # ✓ CORREGIDO: Los 3 criterios juntos (antes solo evaluaba 2: lap and snr)
+    confirmado = flags["lap"] and flags["snr"] and flags["ent"]
     return activos, confirmado
 
 
@@ -160,15 +148,12 @@ def _severidad_blur(m):
 
 
 def clasificar(m):
-    """
-    Evalúa sobreexposición y blur de forma INDEPENDIENTE.
-    Retorna un dict con los dos diagnósticos y la decisión final.
-    """
+    """Evalúa sobreexposición y blur de forma INDEPENDIENTE."""
     c_sobrex  = _criterios_sobrex(m)
     c_blur, blur_ok = _criterios_blur(m)
 
-    tiene_sobrex = len(c_sobrex) >= 2          # 2 o más criterios = confirmado
-    tiene_blur   = blur_ok                      # los 3 criterios juntos
+    tiene_sobrex = len(c_sobrex) >= 2
+    tiene_blur   = blur_ok
 
     resultado = {
         "sobrex": None,
@@ -202,7 +187,7 @@ def clasificar(m):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  CORRECCIÓN  (sobreexposición primero, luego blur)
+#  CORRECCIÓN — VERSIÓN MEJORADA
 # ═══════════════════════════════════════════════════════════════
 
 def _gamma_clahe(img, gamma, clahe_clip, tile):
@@ -212,35 +197,67 @@ def _gamma_clahe(img, gamma, clahe_clip, tile):
 
 
 def _estimar_psf(img, longitud):
-    from skimage.transform import radon
-    f   = np.fft.fftshift(np.fft.fft2(img.astype(np.float64)))
-    esp = np.log1p(np.abs(f))
-    esp = (esp / esp.max() * 255).astype(np.uint8)
-    ang = np.arange(0, 180, 1)
-    sin = radon(esp, theta=ang, circle=False)
-    ap  = ang[np.argmax(sin.var(axis=0))]
-    ab  = float((ap + 90) % 180)
-    k   = np.zeros((longitud, longitud))
-    k[longitud // 2, :] = 1.0 / longitud
-    M   = cv2.getRotationMatrix2D((longitud // 2, longitud // 2), ab, 1.0)
-    k   = cv2.warpAffine(k, M, (longitud, longitud))
-    return (k / k.sum()) if k.sum() != 0 else k
+    """
+    ✓ MEJORADO: PSF Gaussiano en lugar de kernel lineal artificial.
+    Elimina las líneas horizontales de distorsión.
+    """
+    sigma = 1.2
+    ax = np.arange(-longitud // 2, longitud // 2 + 1, dtype=np.float32)
+    kernel_1d = np.exp(-(ax ** 2) / (2 * sigma ** 2))
+    kernel_1d /= kernel_1d.sum()
+    
+    # PSF bidimensional realista
+    psf = np.outer(kernel_1d, kernel_1d)
+    return (psf / psf.sum()) if psf.sum() != 0 else psf
 
 
 def _wiener(img, psf, balance):
-    f       = img.astype(np.float64) / 255.0
-    pad     = np.zeros_like(f)
-    ph, pw  = psf.shape
-    pad[:ph, :pw] = psf
-    H     = np.fft.fft2(pad)
-    G     = np.fft.fft2(f)
-    F_hat = (np.conj(H) / (np.abs(H) ** 2 + balance)) * G
-    return (np.clip(np.real(np.fft.ifft2(F_hat)), 0, 1) * 255).astype(np.uint8)
+    """
+    ✓ MEJORADO: Deconvolución Wiener con padding reflexivo.
+    - Padding circular (reflect) elimina artefactos de borde
+    - Balance adaptativo 100x mayor para radiografía médica
+    - Normalización segura de valores finales
+    """
+    f = img.astype(np.float64) / 255.0
+    h, w = img.shape
+    ph, pw = psf.shape
+    
+    # Padding reflexivo (mejor que ceros para radiografía)
+    pad = np.pad(f, ((ph//2, ph//2), (pw//2, pw//2)), mode='reflect')
+    
+    # FFT con tamaño adecuado
+    fft_size = (pad.shape[0], pad.shape[1])
+    H = np.fft.fft2(np.pad(psf, ((0, fft_size[0]-ph), (0, fft_size[1]-pw))), s=fft_size)
+    G = np.fft.fft2(pad, s=fft_size)
+    
+    H_conj = np.conj(H)
+    H_abs2 = np.abs(H) ** 2
+    
+    # Balance adaptativo (100x mayor que original)
+    balance_max = np.max(H_abs2)
+    balance_adaptivo = balance * balance_max if balance_max > 0 else balance
+    
+    # Deconvolución Wiener
+    F_hat = (H_conj / (H_abs2 + balance_adaptivo)) * G
+    resultado = np.real(np.fft.ifft2(F_hat))
+    
+    # Recortar al tamaño original
+    resultado = resultado[ph//2:ph//2+h, pw//2:pw//2+w]
+    
+    # Normalización segura (clipping antes de rescalar)
+    resultado = np.clip(resultado * 255, 0, 255)
+    return resultado.astype(np.uint8)
 
 
 def _sharpen(img):
-    k = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
-    return np.clip(cv2.filter2D(img.astype(np.float32), -1, k), 0, 255).astype(np.uint8)
+    """
+    ✓ MEJORADO: Nitidez controlada con unsharp mask suave.
+    Más seguro que filtros derivativos para radiografías.
+    """
+    blur = cv2.GaussianBlur(img, (3, 3), 1.0)
+    sharp = cv2.addWeighted(img.astype(np.float32), 1.2, 
+                           blur.astype(np.float32), -0.2, 0)
+    return np.clip(sharp, 0, 255).astype(np.uint8)
 
 
 def _unsharp(img, radio, cantidad):
@@ -251,27 +268,36 @@ def _unsharp(img, radio, cantidad):
 
 def aplicar_correcciones(img, dx):
     """
-    Aplica correcciones en orden: sobreexposición → blur.
-    Cada una se aplica solo si fue detectada.
+    ✓ MEJORADO: Orden optimizado con pre-filtrado bilateral.
+    1. Bilateral filter (reduce ruido sin borrar detalles)
+    2. Gamma + CLAHE (sobreexposición)
+    3. Wiener mejorado (blur)
+    4. Nitidez suave
     """
     resultado = img.copy()
-
+    
+    # Pre-procesamiento: bilateral filter para limpieza de ruido
+    resultado = cv2.bilateralFilter(resultado, d=5, sigmaColor=50, sigmaSpace=50)
+    
     if dx["sobrex"]:
         p = dx["sobrex"]["params"]
         resultado = _gamma_clahe(resultado, p["gamma"], p["clahe_clip"], p["tile"])
-
+    
     if dx["blur"]:
         p = dx["blur"]["params"]
         if p["metodo"] == "wiener":
             sev = dx["blur"]["severidad"]
-            lng = 15 if sev == "leve" else 25 if sev == "moderada" else 35
+            # Tamaños PSF más conservadores
+            lng = 7 if sev == "leve" else 13 if sev == "moderada" else 19
             psf = _estimar_psf(resultado, lng)
-            resultado = _wiener(resultado, psf, p["balance"])
+            # Balance aumentado 100x para radiografía
+            balance_escalado = p["balance"] * 100
+            resultado = _wiener(resultado, psf, balance_escalado)
             if p.get("sharpen_post"):
                 resultado = _sharpen(resultado)
         else:
             resultado = _unsharp(resultado, p["radio"], p["cantidad"])
-
+    
     return resultado
 
 
@@ -710,7 +736,6 @@ st.set_page_config(
 )
 st.markdown(CSS, unsafe_allow_html=True)
 
-# ── Estado de sesión ──────────────────────────────────────────
 for k in ["ok", "img_pre", "img_corr", "m", "m_corr", "dx", "nombre"]:
     if k not in st.session_state:
         st.session_state[k] = None
@@ -837,7 +862,6 @@ if exportar and st.session_state.ok:
 # ═══════════════════════════════════════════════════════════════
 
 if not st.session_state.ok:
-    # ── Estado inicial ─────────────────────────────────────────
     st.markdown("""
     <div class="topbar">
         <span class="topbar-logo">RX Tórax</span>
@@ -847,14 +871,13 @@ if not st.session_state.ok:
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.markdown('<div class="panel"><div class="panel-header">Fase 1 — Diagnóstico</div><div class="panel-body" style="font-size:12px;color:#718096;line-height:1.7">Calcula 8 métricas cuantitativas y clasifica la imagen de forma <b>independiente</b> por sobreexposición y blur. Una imagen puede tener ambos simultáneamente.</div></div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel"><div class="panel-header">Fase 1 — Diagnóstico</div><div class="panel-body" style="font-size:12px;color:#718096;line-height:1.7">Calcula 8 métricas cua[...]
     with c2:
-        st.markdown('<div class="panel"><div class="panel-header">Fase 2 — Corrección</div><div class="panel-body" style="font-size:12px;color:#718096;line-height:1.7">Aplica Gamma + CLAHE para sobreexposición y Wiener / Unsharp Mask para blur — en ese orden, sin interferencia entre correcciones.</div></div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel"><div class="panel-header">Fase 2 — Corrección</div><div class="panel-body" style="font-size:12px;color:#718096;line-height:1.7">Aplica Gamma + CLAHE par[...]
     with c3:
-        st.markdown('<div class="panel"><div class="panel-header">Reporte</div><div class="panel-body" style="font-size:12px;color:#718096;line-height:1.7">Genera dashboard comparativo con 8 KPIs, histograma, tabla de métricas antes/después y decisión final de aptitud diagnóstica.</div></div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel"><div class="panel-header">Reporte</div><div class="panel-body" style="font-size:12px;color:#718096;line-height:1.7">Genera dashboard comparativo con 8 KPIs[...]
 
 else:
-    # ── Dashboard ──────────────────────────────────────────────
     m        = st.session_state.m
     m_corr   = st.session_state.m_corr
     dx       = st.session_state.dx
@@ -874,7 +897,6 @@ else:
         dx_post   = None
         apta_post = es_apta
 
-    # ── Topbar ────────────────────────────────────────────────
     badges_html = ""
     if tiene_sobrex:
         badges_html += badge(f"Sobreexposición · {dx['sobrex']['severidad']}", "danger") + " "
@@ -896,7 +918,6 @@ else:
     </div>
     """, unsafe_allow_html=True)
 
-    # ── KPI strip (8 métricas en 2 filas de 4) ───────────────
     KPIS = [
         ("Var. Laplaciano", "laplaciano", "blue",  False, 100),
         ("SNR (dB)",        "snr",        "blue",  False, 40),
@@ -931,7 +952,6 @@ else:
 
     st.markdown("---")
 
-    # ── Pestañas principales ──────────────────────────────────
     tab_img, tab_hist, tab_met, tab_rep = st.tabs([
         "🖼 Comparación visual",
         "📊 Histograma",
@@ -939,7 +959,6 @@ else:
         "📄 Reporte",
     ])
 
-    # ── Tab 1: Imágenes ───────────────────────────────────────
     with tab_img:
         if hay_corr:
             fig = fig_comparacion(img_pre, img_corr)
@@ -954,7 +973,6 @@ else:
                 )
             plt.close(fig)
 
-            # Métodos aplicados
             st.markdown("---")
             mc1, mc2 = st.columns(2)
             if tiene_sobrex:
@@ -991,7 +1009,6 @@ else:
             </div>""", unsafe_allow_html=True)
             st.image(img_pre, caption="Imagen preprocesada", clamp=True)
 
-    # ── Tab 2: Histograma ─────────────────────────────────────
     with tab_hist:
         fig_h = fig_histograma(img_pre, img_corr)
         st.pyplot(fig_h, use_container_width=True)
@@ -1025,7 +1042,6 @@ else:
                 st.markdown(criterio_box("Blur", ["Sin criterios activos"], "ok"),
                             unsafe_allow_html=True)
 
-    # ── Tab 3: Métricas ───────────────────────────────────────
     with tab_met:
         TABLA_KEYS = [
             ("laplaciano", "Var. Laplaciano", False),
@@ -1058,10 +1074,9 @@ else:
             st.markdown(f"""
             <div class="crit-box {'ok' if apta_post else 'danger'}">
                 <div class="crit-title">{'✓ Apta post-corrección' if apta_post else '✗ No apta post-corrección'}</div>
-                <div class="crit-detail">{'Todas las métricas están dentro del rango aceptable tras la corrección.' if apta_post else 'Algunas métricas siguen fuera del rango. Revisar imagen manualmente.'}</div>
+                <div class="crit-detail">{'Todas las métricas están dentro del rango aceptable tras la corrección.' if apta_post else 'Algunas métricas siguen fuera del rango. Revisar imagen[...]
             </div>""", unsafe_allow_html=True)
 
-    # ── Tab 4: Reporte ────────────────────────────────────────
     with tab_rep:
         dx_str = dx["final"] if (tiene_sobrex or tiene_blur) else "APTA PARA DIAGNÓSTICO"
         dx_fin = clasificar(m_corr)["final"] if m_corr else dx_str
