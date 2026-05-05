@@ -869,7 +869,7 @@ if not st.session_state.ok:
     </div>
     """, unsafe_allow_html=True)
 
-       c1, c2, c3 = st.columns(3)
+    c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown("""
         <div class="panel">
