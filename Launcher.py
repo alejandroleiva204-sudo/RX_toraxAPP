@@ -268,6 +268,7 @@ def aplicar_correcciones(img, dx):
     Cada una se aplica solo si fue detectada.
     """
     resultado = img.copy()
+    m_orig= calcular_metricas(img)
 
     if dx["sobrex"]:
         p = dx["sobrex"]["params"]
@@ -819,10 +820,7 @@ if archivo and analizar:
 
         img_corr = None
         m_corr   = None
-       # --- PROCESAMIENTO Y VALIDACIÓN FINAL ---
-        img_corr = None
-        m_corr   = None
-        
+     # Validacion Final
         if dx["sobrex"] or dx["blur"]:
             # Aplicamos correcciones (esta función ya debe tener la protección SNR del Punto 2)
             img_corr = aplicar_correcciones(img_pre, dx)
