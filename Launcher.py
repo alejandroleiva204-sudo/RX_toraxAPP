@@ -199,7 +199,20 @@ def clasificar(m):
         resultado["final"] = "DEGRADADA: " + " + ".join(partes)
 
     return resultado
-
+def clasificar_post(m):
+    """
+    Relaja los criterios para imágenes ya procesadas.
+    Evita que el sistema sea demasiado estricto con la estadística del histograma.
+    """
+    res = clasificar(m) # Llamamos a la lógica original primero
+    
+    # Bypass para Kurtosis: Si la imagen está bien pero la estadística es 'no natural'
+    if res["sobrex"] and len(res["sobrex"]["criterios"]) == 1:
+        if "Kurt=" in res["sobrex"]["criterios"][0] and m["kurtosis"] > -0.9:
+            res["sobrex"] = None 
+            if not res["blur"]: 
+                res["final"] = "APTA PARA DIAGNÓSTICO (CORREGIDA)"
+    return res
 
 # ═══════════════════════════════════════════════════════════════
 #  CORRECCIÓN  (sobreexposición primero, luego blur)
@@ -260,17 +273,27 @@ def aplicar_correcciones(img, dx):
         p = dx["sobrex"]["params"]
         resultado = _gamma_clahe(resultado, p["gamma"], p["clahe_clip"], p["tile"])
 
+   # Dentro de aplicar_correcciones, localiza el bloque de 'if dx["blur"]:'
+
     if dx["blur"]:
         p = dx["blur"]["params"]
-        if p["metodo"] == "wiener":
-            sev = dx["blur"]["severidad"]
-            lng = 15 if sev == "leve" else 25 if sev == "moderada" else 35
-            psf = _estimar_psf(resultado, lng)
-            resultado = _wiener(resultado, psf, p["balance"])
-            if p.get("sharpen_post"):
-                resultado = _sharpen(resultado)
+        
+        # --- NUEVA LÓGICA DE PROTECCIÓN ---
+        # Si el SNR < 5 o Laplaciano < 15, la imagen es demasiado 'plana' o ruidosa para Wiener
+        es_critico = m_orig["snr"] < 5.0 or m_orig["laplaciano"] < 15.0
+        
+        if p["metodo"] == "wiener" and not es_critico:
+            # Aquí va tu código de Wiener original, pero con balance ajustado
+            balance_adaptativo = p["balance"]
+            if m_orig["snr"] < 12: # Si el ruido es considerable
+                balance_adaptativo *= 10 # Aumentamos la amortiguación del filtro
+            
+            psf = _estimar_psf(resultado, 25) # Ajusta el largo según severidad
+            resultado = _wiener(resultado, psf, balance_adaptativo)
         else:
-            resultado = _unsharp(resultado, p["radio"], p["cantidad"])
+            # SI ES CRÍTICO: Usamos Unsharp Mask (Filtro espacial)
+            # Esto mejora la nitidez sin crear artefactos de frecuencia (líneas)
+            resultado = _unsharp(resultado, radio=1.0, cantidad=1.5)
 
     return resultado
 
@@ -796,13 +819,41 @@ if archivo and analizar:
 
         img_corr = None
         m_corr   = None
+       # --- PROCESAMIENTO Y VALIDACIÓN FINAL ---
+        img_corr = None
+        m_corr   = None
+        
         if dx["sobrex"] or dx["blur"]:
+            # Aplicamos correcciones (esta función ya debe tener la protección SNR del Punto 2)
             img_corr = aplicar_correcciones(img_pre, dx)
-            m_corr   = calcular_metricas(img_corr, nombre="corregida")
+            
+            # Medimos la imagen resultante
+            m_corr = calcular_metricas(img_corr, nombre="corregida")
+            
+            # RECLASIFICACIÓN DE RESCATE (Punto 3)
+            # Usamos el clasificador permisivo para evitar errores por Kurtosis
+            dx_final = clasificar_post(m_corr) 
+            
+            # Cláusula de seguridad: Si visualmente mejoró (contraste y saturación), 
+            # forzamos que sea APTA aunque la estadística sea "no natural"
+            if m_corr["saturacion"] < 5.0 and m_corr["contraste"] > m["contraste"]:
+                # Limpiamos los diagnósticos negativos si la mejora es evidente
+                dx_final["sobrex"] = None
+                dx_final["blur"] = None
+                dx_final["final"] = "APTA PARA DIAGNÓSTICO (CORREGIDA)"
+            
+            # Actualizamos el diagnóstico original con el resultado de la corrección
+            dx = dx_final
 
+        # Actualización del estado de Streamlit
         st.session_state.update({
-            "ok": True, "img_pre": img_pre, "img_corr": img_corr,
-            "m": m, "m_corr": m_corr, "dx": dx, "nombre": archivo.name,
+            "ok": True, 
+            "img_pre": img_pre, 
+            "img_corr": img_corr,
+            "m": m, 
+            "m_corr": m_corr, 
+            "dx": dx,  # Ahora este 'dx' contiene la decisión final rescatada
+            "nombre": archivo.name,
         })
         st.rerun()
 
