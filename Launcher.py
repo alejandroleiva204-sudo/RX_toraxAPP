@@ -878,8 +878,8 @@ with st.sidebar:
                 </div>
             </div>
             """, unsafe_allow_html=True)
-            st.markdown("---")
-            st.markdown("#### Clasificación activa")
+           st.markdown("---")
+           st.markdown("#### Clasificación activa")
 
         dx = st.session_state.dx
 
