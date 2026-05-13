@@ -227,15 +227,30 @@ def _estimar_psf(img, longitud):
     return (k / k.sum()) if k.sum() != 0 else k
 
 
-def _wiener(img, psf, balance):
-    f       = img.astype(np.float64) / 255.0
-    pad     = np.zeros_like(f)
-    ph, pw  = psf.shape
-    pad[:ph, :pw] = psf
-    H     = np.fft.fft2(pad)
-    G     = np.fft.fft2(f)
-    F_hat = (np.conj(H) / (np.abs(H) ** 2 + balance)) * G
-    return (np.clip(np.real(np.fft.ifft2(F_hat)), 0, 1) * 255).astype(np.uint8)
+def _deblur_robusto(img, severidad):
+    """
+    Pipeline sin estimación de PSF: evita ringing y bandas direccionales.
+    Severidad leve → unsharp moderado.
+    Severidad moderada/severa → bilateral + unsharp agresivo + realce de bordes.
+    """
+    if severidad == "leve":
+        return _unsharp(img, radio=2.0, cantidad=1.5)
+
+    # Paso 1: Denoising bilateral (preserva bordes, no introduce frecuencias espurias)
+    d = 9 if severidad == "moderada" else 12
+    sigma_c = 50 if severidad == "moderada" else 75
+    denoised = cv2.bilateralFilter(img, d=d, sigmaColor=sigma_c, sigmaSpace=sigma_c)
+
+    # Paso 2: Unsharp agresivo sobre imagen denoisada
+    cantidad = 2.0 if severidad == "moderada" else 2.8
+    sharpened = _unsharp(denoised, radio=1.5, cantidad=cantidad)
+
+    # Paso 3: Realce de bordes con Laplaciano suave (no el kernel duro de _sharpen)
+    lap = cv2.Laplacian(sharpened, cv2.CV_64F, ksize=3)
+    lap_norm = np.clip(lap * 0.3, -50, 50)
+    result = np.clip(sharpened.astype(np.float64) + lap_norm, 0, 255).astype(np.uint8)
+
+    return result
 
 
 def _sharpen(img):
@@ -262,19 +277,13 @@ def aplicar_correcciones(img, dx):
 
     if dx["blur"]:
         p = dx["blur"]["params"]
+        sev = dx["blur"]["severidad"]
         if p["metodo"] == "wiener":
-            sev = dx["blur"]["severidad"]
-            lng = 15 if sev == "leve" else 25 if sev == "moderada" else 35
-            # ── CORRECCIÓN: Re-estimar PSF sobre la imagen ya corregida de sobreexposición,
-            #    y saltarse Wiener si la varianza es demasiado baja (imagen limpia sin blur real)
             lap_check = float(np.var(cv2.Laplacian(resultado.astype(np.float64), cv2.CV_64F)))
-            if lap_check > 80:          # si el Laplaciano subió tras corregir sobreexp., no hay blur real
+            if lap_check > 80:
                 resultado = _unsharp(resultado, radio=1.5, cantidad=0.8)
             else:
-                psf = _estimar_psf(resultado, lng)
-                resultado = _wiener(resultado, psf, p["balance"])
-                if p.get("sharpen_post"):
-                    resultado = _sharpen(resultado)
+                resultado = _deblur_robusto(resultado, sev)
         else:
             resultado = _unsharp(resultado, p["radio"], p["cantidad"])
 
