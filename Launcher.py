@@ -865,9 +865,8 @@ with st.sidebar:
     analizar  = st.button("▶ Analizar imagen", use_container_width=True, type="primary")
     exportar  = st.button("⬇ Exportar reporte", use_container_width=True,
                           disabled=not st.session_state.ok)
-
-   if st.session_state.ok and st.session_state.dx:
-
+    
+    if st.session_state.ok and st.session_state.dx:
     # ── Aviso: blur descartado ──────────────────────────
        if st.session_state.get("blur_descartado", False):
            st.markdown("""
