@@ -141,7 +141,7 @@ def _criterios_blur(m):
     if flags["snr"]: activos.append(f"SNR={m['snr']:.1f} dB < {UMBRAL_BLUR['snr']} dB")
     if flags["ent"]: activos.append(f"Entropía={m['entropia']:.2f} < {UMBRAL_BLUR['entropia']}")
     # Blur confirmado solo si los 3 se activan
-    confirmado = flags["lap"] and flags["snr"] and flags["ent"]
+    confirmado = flags["lap"] and flags["snr"]
     return activos, confirmado
 
 
@@ -199,20 +199,7 @@ def clasificar(m):
         resultado["final"] = "DEGRADADA: " + " + ".join(partes)
 
     return resultado
-def clasificar_post(m):
-    """
-    Relaja los criterios para imágenes ya procesadas.
-    Evita que el sistema sea demasiado estricto con la estadística del histograma.
-    """
-    res = clasificar(m) # Llamamos a la lógica original primero
-    
-    # Bypass para Kurtosis: Si la imagen está bien pero la estadística es 'no natural'
-    if res["sobrex"] and len(res["sobrex"]["criterios"]) == 1:
-        if "Kurt=" in res["sobrex"]["criterios"][0] and m["kurtosis"] > -0.9:
-            res["sobrex"] = None 
-            if not res["blur"]: 
-                res["final"] = "APTA PARA DIAGNÓSTICO (CORREGIDA)"
-    return res
+
 
 # ═══════════════════════════════════════════════════════════════
 #  CORRECCIÓN  (sobreexposición primero, luego blur)
@@ -264,126 +251,35 @@ def _unsharp(img, radio, cantidad):
 
 def aplicar_correcciones(img, dx):
     """
-    Aplica correcciones en orden:
-    1) Sobreexposición
-    2) Revalidación de blur
-    3) Wiener/Unsharp SOLO si el blur sigue existiendo
+    Aplica correcciones en orden: sobreexposición → blur.
+    Cada una se aplica solo si fue detectada.
     """
-
     resultado = img.copy()
 
-    # Flag para dashboard
-    blur_descartado = False
-
-    # =========================================================
-    # 1) CORRECCIÓN SOBREEXPOSICIÓN
-    # =========================================================
     if dx["sobrex"]:
-
         p = dx["sobrex"]["params"]
+        resultado = _gamma_clahe(resultado, p["gamma"], p["clahe_clip"], p["tile"])
 
-        resultado = _gamma_clahe(
-            resultado,
-            p["gamma"],
-            p["clahe_clip"],
-            p["tile"]
-        )
-
-    # =========================================================
-    # 2) VALIDACIÓN REAL DE BLUR
-    # =========================================================
     if dx["blur"]:
-
-        # Métricas originales
-        m_orig = calcular_metricas(img)
-
-        # Métricas luego de corregir sobreexposición
-        m_post = calcular_metricas(resultado)
-
-        lap_original = m_orig["laplaciano"]
-        lap_post     = m_post["laplaciano"]
-
-        # -----------------------------------------------------
-        # FIX PRINCIPAL:
-        # Si Laplaciano sube >3x,
-        # el blur era falso (causado por sobreexposición)
-        # -----------------------------------------------------
-        blur_era_falso = lap_post > (lap_original * 3)
-
-        # Wiener con SNR extremadamente bajo destruye imagen
-        snr_insuficiente = m_post["snr"] < 5.0
-
-        if blur_era_falso:
-            blur_descartado = True
-
-        # -----------------------------------------------------
-        # SOLO aplicar blur si realmente persiste
-        # -----------------------------------------------------
-        if not blur_era_falso and not snr_insuficiente:
-
-            p = dx["blur"]["params"]
-
-            if p["metodo"] == "wiener":
-
-                sev = dx["blur"]["severidad"]
-
-                if sev == "leve":
-                    lng = 15
-                elif sev == "moderada":
-                    lng = 25
-                else:
-                    lng = 35
-
+        p = dx["blur"]["params"]
+        if p["metodo"] == "wiener":
+            sev = dx["blur"]["severidad"]
+            lng = 15 if sev == "leve" else 25 if sev == "moderada" else 35
+            # ── CORRECCIÓN: Re-estimar PSF sobre la imagen ya corregida de sobreexposición,
+            #    y saltarse Wiener si la varianza es demasiado baja (imagen limpia sin blur real)
+            lap_check = float(np.var(cv2.Laplacian(resultado.astype(np.float64), cv2.CV_64F)))
+            if lap_check > 80:          # si el Laplaciano subió tras corregir sobreexp., no hay blur real
+                resultado = _unsharp(resultado, radio=1.5, cantidad=0.8)
+            else:
                 psf = _estimar_psf(resultado, lng)
-
-                resultado = _wiener(
-                    resultado,
-                    psf,
-                    p["balance"]
-                )
-
+                resultado = _wiener(resultado, psf, p["balance"])
                 if p.get("sharpen_post"):
                     resultado = _sharpen(resultado)
-
-            else:
-
-                resultado = _unsharp(
-                    resultado,
-                    p["radio"],
-                    p["cantidad"]
-                )
-
-    # =========================================================
-    # Guardar estado para dashboard
-    # =========================================================
-    st.session_state["blur_descartado"] = blur_descartado
+        else:
+            resultado = _unsharp(resultado, p["radio"], p["cantidad"])
 
     return resultado
-    
-def es_apta_post_correccion(m_orig, m_corr):
-    """
-    Evalúa si la imagen corregida puede considerarse apta
-    usando mejora relativa y no solo umbrales absolutos.
-    """
 
-    lap_mejor = (
-        m_corr["laplaciano"]
-        > m_orig["laplaciano"] * 1.2
-    )
-
-    kurt_mejor = (
-        abs(m_corr["kurtosis"])
-        < abs(m_orig["kurtosis"]) * 0.8
-    )
-
-    media_ok = m_corr["media"] < 160
-    snr_ok   = m_corr["snr"] > 5.0
-
-    return (
-        (lap_mejor and kurt_mejor)
-        or
-        (media_ok and snr_ok)
-    )
 
 # ═══════════════════════════════════════════════════════════════
 #  FIGURAS MATPLOTLIB
@@ -821,7 +717,7 @@ st.set_page_config(
 st.markdown(CSS, unsafe_allow_html=True)
 
 # ── Estado de sesión ──────────────────────────────────────────
-for k in ["ok", "img_pre", "img_corr", "m", "m_corr", "dx", "nombre", "blur_descartado"]:
+for k in ["ok", "img_pre", "img_corr", "m", "m_corr", "dx", "nombre"]:
     if k not in st.session_state:
         st.session_state[k] = None
 
@@ -865,30 +761,32 @@ with st.sidebar:
     analizar  = st.button("▶ Analizar imagen", use_container_width=True, type="primary")
     exportar  = st.button("⬇ Exportar reporte", use_container_width=True,
                           disabled=not st.session_state.ok)
-    
+
     if st.session_state.ok and st.session_state.dx:
-    # ── Aviso: blur descartado ──────────────────────────
-       if st.session_state.get("blur_descartado", False):
-           st.markdown("""
-            <div class="crit-box warn">
-                <div class="crit-title">⚠ Blur descartado</div>
-                <div class="crit-detail">
-                El Laplaciano bajo era consecuencia
-                de la sobreexposición y no blur real.
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-           st.markdown("---")
-           st.markdown("#### Clasificación activa")
-           dx = st.session_state.dx
-           if dx["sobrex"]:
-                st.markdown(criterio_box(f"Sobreexposición · {dx['sobrex']['severidad']}",dx["sobrex"]["criterios"],"danger"),unsafe_allow_html=True)
-           else:
-               st.markdown(criterio_box("Sobreexposición", ["No detectada"], "ok" ), unsafe_allow_html=True)
-           if dx["blur"]:
-                st.markdown(criterio_box( f"Blur · {dx['blur']['severidad']}", dx["blur"]["criterios"], "warn"), unsafe_allow_html=True)
-           else:
-                st.markdown(criterio_box( "Blur", ["No detectado"], "ok" ), unsafe_allow_html=True)
+        st.markdown("---")
+        st.markdown("#### Clasificación activa")
+        dx = st.session_state.dx
+        if dx["sobrex"]:
+            st.markdown(
+                criterio_box(
+                    f"Sobreexposición · {dx['sobrex']['severidad']}",
+                    dx["sobrex"]["criterios"], "danger"
+                ), unsafe_allow_html=True
+            )
+        else:
+            st.markdown(criterio_box("Sobreexposición", ["No detectada"], "ok"),
+                        unsafe_allow_html=True)
+        if dx["blur"]:
+            st.markdown(
+                criterio_box(
+                    f"Blur · {dx['blur']['severidad']}",
+                    dx["blur"]["criterios"], "warn"
+                ), unsafe_allow_html=True
+            )
+        else:
+            st.markdown(criterio_box("Blur", ["No detectado"], "ok"),
+                        unsafe_allow_html=True)
+
 
 # ═══════════════════════════════════════════════════════════════
 #  PROCESAMIENTO
@@ -904,38 +802,13 @@ if archivo and analizar:
 
         img_corr = None
         m_corr   = None
-     # Validacion Final
         if dx["sobrex"] or dx["blur"]:
-            # Aplicamos correcciones (esta función ya debe tener la protección SNR del Punto 2)
             img_corr = aplicar_correcciones(img_pre, dx)
-            
-            # Medimos la imagen resultante
-            m_corr = calcular_metricas(img_corr, nombre="corregida")
-            
-            # RECLASIFICACIÓN DE RESCATE (Punto 3)
-            # Usamos el clasificador permisivo para evitar errores por Kurtosis
-            dx_final = clasificar_post(m_corr) 
-            
-            # Cláusula de seguridad: Si visualmente mejoró (contraste y saturación), 
-            # forzamos que sea APTA aunque la estadística sea "no natural"
-            if m_corr["saturacion"] < 5.0 and m_corr["contraste"] > m["contraste"]:
-                # Limpiamos los diagnósticos negativos si la mejora es evidente
-                dx_final["sobrex"] = None
-                dx_final["blur"] = None
-                dx_final["final"] = "APTA PARA DIAGNÓSTICO (CORREGIDA)"
-            
-            # Actualizamos el diagnóstico original con el resultado de la corrección
-            dx = dx_final
+            m_corr   = calcular_metricas(img_corr, nombre="corregida")
 
-        # Actualización del estado de Streamlit
         st.session_state.update({
-            "ok": True, 
-            "img_pre": img_pre, 
-            "img_corr": img_corr,
-            "m": m, 
-            "m_corr": m_corr, 
-            "dx": dx,  # Ahora este 'dx' contiene la decisión final rescatada
-            "nombre": archivo.name,
+            "ok": True, "img_pre": img_pre, "img_corr": img_corr,
+            "m": m, "m_corr": m_corr, "dx": dx, "nombre": archivo.name,
         })
         st.rerun()
 
@@ -1001,9 +874,8 @@ else:
     es_apta    = not tiene_sobrex and not tiene_blur
 
     if m_corr:
-        dx_post = clasificar(m_corr)
-        # NUEVA evaluación inteligente
-        apta_post = es_apta_post_correccion(m, m_corr)
+        dx_post    = clasificar(m_corr)
+        apta_post  = not dx_post["sobrex"] and not dx_post["blur"]
     else:
         dx_post   = None
         apta_post = es_apta
