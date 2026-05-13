@@ -1,3 +1,5 @@
+# Instalar lo siguiente
+comando de instalación: "pip install streamlit opencv-python scikit-image scipy matplotlib Pillow numpy"
 streamlit
 opencv-python-headless
 scikit-image
