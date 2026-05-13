@@ -880,8 +880,7 @@ with st.sidebar:
             """, unsafe_allow_html=True)
            st.markdown("---")
            st.markdown("#### Clasificación activa")
-
-        dx = st.session_state.dx
+           dx = st.session_state.dx
 
         if dx["sobrex"]:
             st.markdown(
