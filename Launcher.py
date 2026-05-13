@@ -41,9 +41,9 @@ UMBRAL_SOBREX = {
 # El Laplaciano solo NO es suficiente (se sesga por sobreexposición).
 # ── Blur ─────────────────────────────────────────────────────
 UMBRAL_BLUR = {
-    "laplaciano":  80.0,   # antes: 100 — más estricto para evitar falsos positivos
-    "snr":         15.0,   # antes: 20  — el SNR de imágenes normales ronda 7-15 dB
-    "entropia":     6.5,   # antes: 7.0 — entropía 7.23 ya no dispara el criterio
+    "laplaciano":  95.0,   # antes: 100 — más estricto para evitar falsos positivos
+    "snr":         18.5,   # antes: 20  — el SNR de imágenes normales ronda 7-15 dB
+    "entropia":     7.0,   # antes: 7.0 — entropía 7.23 ya no dispara el criterio
 }
 
 # ── Severidad sobreexposición ─────────────────────────────────
@@ -131,6 +131,7 @@ def _criterios_sobrex(m):
 
 
 def _criterios_blur(m):
+    """Retorna lista de criterios activos de blur. Los 3 deben activarse."""
     flags = {
         "lap": m["laplaciano"] < UMBRAL_BLUR["laplaciano"],
         "snr": m["snr"]        < UMBRAL_BLUR["snr"],
@@ -140,9 +141,10 @@ def _criterios_blur(m):
     if flags["lap"]: activos.append(f"Lap={m['laplaciano']:.1f} < {UMBRAL_BLUR['laplaciano']}")
     if flags["snr"]: activos.append(f"SNR={m['snr']:.1f} dB < {UMBRAL_BLUR['snr']} dB")
     if flags["ent"]: activos.append(f"Entropía={m['entropia']:.2f} < {UMBRAL_BLUR['entropia']}")
-    # Los 3 deben activarse — sin excepción
-    confirmado = flags["lap"] and flags["snr"] and flags["ent"]
+    # Blur confirmado solo si los 3 se activan
+    confirmado = flags["lap"] and flags["snr"]
     return activos, confirmado
+
 
 
 def _severidad_sobrex(m):
