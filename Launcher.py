@@ -881,18 +881,14 @@ with st.sidebar:
            st.markdown("---")
            st.markdown("#### Clasificación activa")
            dx = st.session_state.dx
-            if dx["sobrex"]:
-                st.markdown(
-                    criterio_box(f"Sobreexposición · {dx['sobrex']['severidad']}",dx["sobrex"]["criterios"],"danger"),unsafe_allow_html=True)
-           else:
-               st.markdown(
-                   criterio_box("Sobreexposición", ["No detectada"], "ok" ), unsafe_allow_html=True)
-            if dx["blur"]:
-                st.markdown(
-                    criterio_box( f"Blur · {dx['blur']['severidad']}", dx["blur"]["criterios"], "warn"), unsafe_allow_html=True)
-            else:
-                st.markdown(
-                    criterio_box( "Blur", ["No detectado"], "ok" ), unsafe_allow_html=True)
+        if dx["sobrex"]:
+            st.markdown(criterio_box(f"Sobreexposición · {dx['sobrex']['severidad']}",dx["sobrex"]["criterios"],"danger"),unsafe_allow_html=True)
+       else:
+           st.markdown(criterio_box("Sobreexposición", ["No detectada"], "ok" ), unsafe_allow_html=True)
+        if dx["blur"]:
+            st.markdown(criterio_box( f"Blur · {dx['blur']['severidad']}", dx["blur"]["criterios"], "warn"), unsafe_allow_html=True)
+        else:
+            st.markdown(criterio_box( "Blur", ["No detectado"], "ok" ), unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════
 #  PROCESAMIENTO
