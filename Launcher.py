@@ -41,7 +41,7 @@ UMBRAL_SOBREX = {
 # El Laplaciano solo NO es suficiente (se sesga por sobreexposición).
 # ── Blur ─────────────────────────────────────────────────────
 UMBRAL_BLUR = {
-    "laplaciano":  50.0,   # antes: 100 — más estricto para evitar falsos positivos
+    "laplaciano":  80.0,   # antes: 100 — más estricto para evitar falsos positivos
     "snr":         15.0,   # antes: 20  — el SNR de imágenes normales ronda 7-15 dB
     "entropia":     6.5,   # antes: 7.0 — entropía 7.23 ya no dispara el criterio
 }
