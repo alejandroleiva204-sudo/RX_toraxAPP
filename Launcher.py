@@ -5,6 +5,7 @@ Instalar : pip install streamlit opencv-python scikit-image scipy matplotlib Pil
 """
 
 import io
+import base64
 import numpy as np
 import cv2
 import streamlit as st
@@ -18,7 +19,13 @@ from skimage.measure import shannon_entropy
 from scipy.stats import kurtosis as scipy_kurtosis
 import warnings
 warnings.filterwarnings("ignore")
-
+from reportlab.lib.pagesizes import letter
+from reportlab.lib import colors
+from reportlab.lib.units import inch
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+import tempfile
 
 # ═══════════════════════════════════════════════════════════════
 #  UMBRALES DE CLASIFICACIÓN
@@ -649,8 +656,359 @@ def met_row(nombre, orig, corr=None, inversa=False):
     return f"<tr><td>{nombre}</td><td>{orig:.4f}</td></tr>"
 
 
-def reporte_txt(m, m_corr, dx, dx_final_str, nombre):
-    ts   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+# ═══════════════════════════════════════════════════════════════
+#  PUNTAJES DE SERVICIO (escala 1–10)
+# ═══════════════════════════════════════════════════════════════
+
+def _normalizar(valor, minv, maxv):
+    return max(0.0, min(1.0, (valor - minv) / (maxv - minv)))
+
+def score_nitidez(m, m_corr=None):
+    src = m_corr if m_corr else m
+    lap = _normalizar(src["laplaciano"], 10, 2000)
+    ent = _normalizar(src["entropia"],   4.5, 7.5)
+    score = max(1, min(10, round((lap * 0.65 + ent * 0.35) * 10)))
+    delta = round((m_corr["laplaciano"] - m["laplaciano"]) * 0.65 +
+                  (m_corr["entropia"]   - m["entropia"]) * 10, 1) if m_corr else None
+    return score, delta
+
+def score_contraste(m, m_corr=None):
+    src = m_corr if m_corr else m
+    rms = _normalizar(src["contraste"],  20, 90)
+    sat = _normalizar(src["saturacion"],  0, 10) * 0.3
+    score = max(1, min(10, round((rms - sat) * 10 + 1)))
+    delta = round((m_corr["contraste"] - m["contraste"]) * 0.5, 1) if m_corr else None
+    return score, delta
+
+def score_ruido(m, m_corr=None):
+    src = m_corr if m_corr else m
+    snr = _normalizar(src["snr"],        5, 40)
+    px  = _normalizar(src["px_oscuros"], 0, 50) * 0.25
+    score = max(1, min(10, round((snr - px) * 10 + 0.5)))
+    delta = round(m_corr["snr"] - m["snr"], 1) if m_corr else None
+    return score, delta
+
+
+# ═══════════════════════════════════════════════════════════════
+#  REPORTE PDF — ReportLab
+# ═══════════════════════════════════════════════════════════════
+
+def generar_reporte_pdf(m, m_corr, dx, dx_final_str, nombre, img_pre, img_corr):
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm, inch
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+        Image as RLImage, HRFlowable, KeepTogether
+    )
+    from reportlab.graphics.shapes import Drawing, Rect, String, Circle
+    from reportlab.graphics import renderPDF
+
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # ── Colores ───────────────────────────────────────────────
+    AZUL        = colors.HexColor("#1b4f8a")
+    AZUL_CLARO  = colors.HexColor("#e8f0fb")
+    GRIS_FONDO  = colors.HexColor("#f5f7fb")
+    GRIS_BORDE  = colors.HexColor("#d8e2ef")
+    GRIS_TEXTO  = colors.HexColor("#4a5a6e")
+    GRIS_LABEL  = colors.HexColor("#6b7c93")
+    VERDE       = colors.HexColor("#1a6b3a")
+    VERDE_FONDO = colors.HexColor("#e4f4ec")
+    VERDE_BORDE = colors.HexColor("#9ed0b3")
+    ROJO        = colors.HexColor("#a32d2d")
+    ROJO_FONDO  = colors.HexColor("#fdf0f0")
+    ROJO_BORDE  = colors.HexColor("#f0b0b0")
+    BLANCO      = colors.white
+    FILA_ALT    = colors.HexColor("#f8fafc")
+    AMBER       = colors.HexColor("#c8882a")
+
+    # ── Estilos de párrafo ────────────────────────────────────
+    def st(name, **kw):
+        base = dict(fontName="Helvetica", fontSize=9, leading=13,
+                    textColor=GRIS_TEXTO)
+        base.update(kw)
+        return ParagraphStyle(name, **base)
+
+    S_TITLE   = st("title",   fontName="Helvetica-Bold", fontSize=15,
+                   textColor=AZUL, leading=18)
+    S_SUB     = st("sub",     fontSize=9, textColor=GRIS_LABEL, leading=12)
+    S_LABEL   = st("label",   fontName="Helvetica-Bold", fontSize=7.5,
+                   textColor=GRIS_LABEL, leading=10, spaceBefore=10, spaceAfter=3)
+    S_BODY    = st("body",    fontSize=9, leading=13)
+    S_BOLD    = st("bold",    fontName="Helvetica-Bold", fontSize=9, leading=13,
+                   textColor=colors.HexColor("#1a2332"))
+    S_SMALL   = st("small",   fontSize=8, textColor=GRIS_LABEL, leading=10)
+    S_CENTER  = st("center",  alignment=TA_CENTER, fontSize=9, leading=13)
+    S_DECISION= st("dec",     fontName="Helvetica-Bold", fontSize=13,
+                   alignment=TA_CENTER, leading=17)
+    S_DEC_BODY= st("decbody", fontSize=9, alignment=TA_CENTER,
+                   leading=14, textColor=GRIS_TEXTO)
+    S_FOOTER  = st("footer",  fontSize=7.5, textColor=colors.HexColor("#a0b0c4"),
+                   leading=10)
+    S_META_K  = st("mk", fontSize=8.5, textColor=GRIS_LABEL,
+                   fontName="Helvetica-Bold", leading=11)
+    S_META_V  = st("mv", fontSize=8.5, textColor=colors.HexColor("#1a2332"),
+                   leading=11)
+
+    # ── Puntajes ──────────────────────────────────────────────
+    s_nit, d_nit = score_nitidez(m,  m_corr)
+    s_con, d_con = score_contraste(m, m_corr)
+    s_rui, d_rui = score_ruido(m,    m_corr)
+
+    def delta_str(d):
+        if d is None: return "—"
+        return f"+{d}" if d >= 0 else str(d)
+
+    def score_colors(s):
+        if s >= 8: return VERDE,       VERDE_FONDO
+        if s >= 6: return AZUL,        AZUL_CLARO
+        return          ROJO,          ROJO_FONDO
+
+    # ── Imagen numpy → RLImage ────────────────────────────────
+    def arr_to_rl(arr, w, h):
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        Image.fromarray(arr.astype(np.uint8)).save(tmp.name)
+        return RLImage(tmp.name, width=w, height=h)
+
+    # ── Histograma matplotlib → RLImage ───────────────────────
+    def hist_rl(img_arr, color_hex, titulo, w, h):
+        fig, ax = plt.subplots(figsize=(w / 72, h / 72))
+        fig.patch.set_facecolor("white")
+        ax.set_facecolor("#f8fafc")
+        ax.hist(img_arr.ravel(), bins=80, range=(0, 255),
+                color=color_hex, alpha=0.82, edgecolor="none")
+        ax.axvline(160, color="#c8882a", linestyle="--",
+                   linewidth=1.0, label="Umbral sobreexp.")
+        ax.set_title(titulo, fontsize=7, pad=3, color="#4a5a6e")
+        ax.set_xlabel("Intensidad (0–255)", fontsize=6.5, color="#8a9ab5")
+        ax.tick_params(labelsize=6, colors="#8a9ab5")
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.spines[["left", "bottom"]].set_edgecolor("#d8e2ef")
+        ax.yaxis.set_visible(False)
+        ax.legend(fontsize=6, framealpha=0.6)
+        fig.tight_layout(pad=0.4)
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        fig.savefig(tmp.name, dpi=180, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        return RLImage(tmp.name, width=w, height=h)
+
+    # ── Círculo de puntaje (Drawing) ──────────────────────────
+    def score_drawing(s, size=26):
+        txt_col, bg_col = score_colors(s)
+        d = Drawing(size, size)
+        d.add(Circle(size/2, size/2, size/2 - 1,
+                     fillColor=bg_col,
+                     strokeColor=txt_col,
+                     strokeWidth=1.2))
+        d.add(String(size/2, size/2 - 4, str(s),
+                     fontSize=12, fontName="Helvetica-Bold",
+                     fillColor=txt_col,
+                     textAnchor="middle"))
+        return d
+
+    # ── Documento ─────────────────────────────────────────────
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=letter,
+        leftMargin=17*mm, rightMargin=17*mm,
+        topMargin=16*mm,  bottomMargin=14*mm,
+    )
+    W = letter[0] - 34*mm   # ancho útil
+
+    story = []
+
+    # ── ENCABEZADO ────────────────────────────────────────────
+    header_data = [[
+        Paragraph("Reporte Técnico de Calidad Radiológica", S_TITLE),
+        Paragraph("UTB · Bioingeniería<br/><b>RX Tórax v3</b>",
+                  st("logo", alignment=TA_RIGHT, fontSize=8,
+                     textColor=GRIS_LABEL, leading=12)),
+    ]]
+    header_tbl = Table(header_data, colWidths=[W * 0.72, W * 0.28])
+    header_tbl.setStyle(TableStyle([
+        ("VALIGN",       (0,0), (-1,-1), "BOTTOM"),
+        ("LEFTPADDING",  (0,0), (-1,-1), 0),
+        ("RIGHTPADDING", (0,0), (-1,-1), 0),
+        ("BOTTOMPADDING",(0,0), (-1,-1), 6),
+    ]))
+    story.append(header_tbl)
+    story.append(Paragraph(
+        "Sistema computacional de evaluación y corrección — RX Tórax",
+        st("subt", fontSize=8.5, textColor=GRIS_LABEL, leading=11, spaceAfter=4)
+    ))
+    story.append(HRFlowable(width="100%", thickness=1.5,
+                             color=AZUL, spaceAfter=10))
+
+    # ── BLOQUE 1: INFO ────────────────────────────────────────
+    story.append(Paragraph("INFORMACIÓN DEL PACIENTE Y DATOS TÉCNICOS", S_LABEL))
+
+    info_data = [
+        [Paragraph("Paciente ID",  S_META_K), Paragraph("Person100 (Anonymized)", S_META_V),
+         Paragraph("Equipo ID",    S_META_K), Paragraph("GE Optima XR240 (Anonymized)", S_META_V)],
+        [Paragraph("Procedimiento",S_META_K), Paragraph("PA Chest X-ray", S_META_V),
+         Paragraph("Proyección",   S_META_K), Paragraph("AP-Pediatric (inferred)", S_META_V)],
+        [Paragraph("Fecha",        S_META_K), Paragraph(ts, S_META_V),
+         Paragraph("Archivo",      S_META_K), Paragraph(nombre, S_META_V)],
+    ]
+    cw = [W*0.13, W*0.37, W*0.13, W*0.37]
+    info_tbl = Table(info_data, colWidths=cw)
+    info_tbl.setStyle(TableStyle([
+        ("BACKGROUND",   (0,0), (-1,-1), GRIS_FONDO),
+        ("GRID",         (0,0), (-1,-1), 0.4, GRIS_BORDE),
+        ("LEFTPADDING",  (0,0), (-1,-1), 7),
+        ("RIGHTPADDING", (0,0), (-1,-1), 7),
+        ("TOPPADDING",   (0,0), (-1,-1), 5),
+        ("BOTTOMPADDING",(0,0), (-1,-1), 5),
+        ("ROUNDEDCORNERS", [4]),
+    ]))
+    story.append(info_tbl)
+
+    # ── DIAGNÓSTICO ───────────────────────────────────────────
+    story.append(Paragraph("DIAGNÓSTICO TÉCNICO", S_LABEL))
+    dx_lines = []
+    if dx["sobrex"]:
+        p = dx["sobrex"]["params"]
+        dx_lines.append(
+            f'<b>Sobreexposición ({dx["sobrex"]["severidad"]}):</b> '
+            f'{", ".join(dx["sobrex"]["criterios"])} — '
+            f'Corrección: Gamma={p["gamma"]} · CLAHE clip={p["clahe_clip"]}'
+        )
+    if dx["blur"]:
+        dx_lines.append(
+            f'<b>Blur ({dx["blur"]["severidad"]}):</b> '
+            f'{", ".join(dx["blur"]["criterios"])} — '
+            f'Corrección: Bilateral + Unsharp Mask + realce laplaciano'
+        )
+    if not dx_lines:
+        dx_lines.append("No se detectaron artefactos en la imagen.")
+
+    dx_rows = [[Paragraph(line, S_BODY)] for line in dx_lines]
+    dx_tbl = Table(dx_rows, colWidths=[W])
+    dx_tbl.setStyle(TableStyle([
+        ("BACKGROUND",   (0,0), (-1,-1), GRIS_FONDO),
+        ("GRID",         (0,0), (-1,-1), 0.4, GRIS_BORDE),
+        ("LEFTPADDING",  (0,0), (-1,-1), 9),
+        ("RIGHTPADDING", (0,0), (-1,-1), 9),
+        ("TOPPADDING",   (0,0), (-1,-1), 5),
+        ("BOTTOMPADDING",(0,0), (-1,-1), 5),
+    ]))
+    story.append(dx_tbl)
+
+    # ── BLOQUE 2: IMÁGENES ────────────────────────────────────
+    story.append(Paragraph("COMPARACIÓN VISUAL — ORIGINAL VS. CORREGIDA", S_LABEL))
+
+    IW = (W - 6*mm) / 2
+    IH = IW * 0.82
+
+    rl_orig = arr_to_rl(img_pre,  IW, IH)
+    rl_corr = arr_to_rl(img_corr, IW, IH) if img_corr is not None else \
+              Paragraph("Sin corrección aplicada", S_CENTER)
+
+    def img_cell(content, label_txt):
+        label = Paragraph(label_txt,
+                          st("ilbl", fontSize=8, textColor=GRIS_LABEL,
+                             fontName="Helvetica-Bold", alignment=TA_CENTER,
+                             leading=10, spaceAfter=3))
+        cell_tbl = Table([[label], [content]],
+                         colWidths=[IW])
+        cell_tbl.setStyle(TableStyle([
+            ("BACKGROUND",   (0,0), (0,0), GRIS_FONDO),
+            ("BACKGROUND",   (0,1), (0,1), colors.black),
+            ("BOX",          (0,0), (-1,-1), 0.4, GRIS_BORDE),
+            ("LEFTPADDING",  (0,0), (-1,-1), 0),
+            ("RIGHTPADDING", (0,0), (-1,-1), 0),
+            ("TOPPADDING",   (0,0), (0,0), 4),
+            ("BOTTOMPADDING",(0,0), (0,0), 4),
+            ("TOPPADDING",   (0,1), (0,1), 0),
+            ("BOTTOMPADDING",(0,1), (0,1), 0),
+            ("ALIGN",        (0,0), (-1,-1), "CENTER"),
+        ]))
+        return cell_tbl
+
+    img_row = Table(
+        [[img_cell(rl_orig, "ORIGINAL"),
+          img_cell(rl_corr, "IMAGEN CORREGIDA")]],
+        colWidths=[IW, IW],
+        hAlign="LEFT",
+    )
+    img_row.setStyle(TableStyle([
+        ("LEFTPADDING",  (0,0), (-1,-1), 0),
+        ("RIGHTPADDING", (0,0), (-1,-1), 0),
+        ("COLPADDING",   (0,0), (-1,-1), 3),
+        ("ALIGN",        (0,0), (-1,-1), "CENTER"),
+    ]))
+    story.append(img_row)
+
+    # ── BLOQUE 3: MÉTRICAS DE SERVICIO ────────────────────────
+    story.append(Paragraph("MÉTRICAS DE CALIDAD — RESUMEN DE SERVICIO", S_LABEL))
+
+    SVC = [
+        (s_nit, d_nit, "Nitidez y Detalle Estructural",
+         "Var. Laplaciano · Entropía",
+         "Mayor visualización de estructuras anatómicas finas: parrilla costal, "
+         "bordes vasculares y contornos mediastínicos."),
+        (s_con, d_con, "Definición de Tejidos (Contraste)",
+         "Contraste RMS · Saturación",
+         "Mayor diferenciación entre densidades de tejido blando, parénquima "
+         "pulmonar y estructuras óseas."),
+        (s_rui, d_rui, "Reducción de Ruido Base",
+         "SNR · Píxeles oscuros",
+         "Mayor claridad en áreas de bajo contraste, reduciendo artefactos "
+         "y mejorando la relación señal-ruido global."),
+    ]
+
+    svc_header = [
+        Paragraph("Puntaje 0-10", st("th", fontName="Helvetica-Bold", fontSize=8,
+                                textColor=BLANCO, alignment=TA_CENTER, leading=10)),
+        Paragraph("Métrica de rendimiento", st("th", fontName="Helvetica-Bold",
+                                               fontSize=8, textColor=BLANCO, leading=10)),
+        Paragraph("Δ Mejora", st("th", fontName="Helvetica-Bold", fontSize=8,
+                                 textColor=BLANCO, alignment=TA_CENTER, leading=10)),
+        Paragraph("Significado clínico", st("th", fontName="Helvetica-Bold",
+                                            fontSize=8, textColor=BLANCO, leading=10)),
+    ]
+
+    svc_rows = [svc_header]
+    for s, d, name, sub, meaning in SVC:
+        txt_col, bg_col = score_colors(s)
+        svc_rows.append([
+            score_drawing(s, 26),
+            [Paragraph(f"<b>{name}</b>",
+                       st("sn", fontSize=9, textColor=colors.HexColor("#1a2332"),
+                          leading=12)),
+             Paragraph(sub, st("ss", fontSize=8, textColor=GRIS_LABEL,
+                               fontName="Helvetica-Oblique", leading=10))],
+            Paragraph(delta_str(d),
+                      st("dp", fontSize=9, fontName="Helvetica-Bold",
+                         textColor=VERDE if (d or 0) >= 0 else ROJO,
+                         alignment=TA_CENTER, leading=12)),
+            Paragraph(meaning, st("sm", fontSize=8.5, textColor=GRIS_TEXTO,
+                                  leading=12)),
+        ])
+
+    svc_tbl = Table(svc_rows,
+                    colWidths=[W*0.09, W*0.31, W*0.12, W*0.48])
+    svc_cmds = [
+        ("BACKGROUND",   (0,0), (-1,0),  AZUL),
+        ("ROWBACKGROUNDS",(0,1),(-1,-1), [BLANCO, FILA_ALT]),
+        ("GRID",         (0,0), (-1,-1), 0.4, GRIS_BORDE),
+        ("LEFTPADDING",  (0,0), (-1,-1), 6),
+        ("RIGHTPADDING", (0,0), (-1,-1), 6),
+        ("TOPPADDING",   (0,0), (-1,-1), 6),
+        ("BOTTOMPADDING",(0,0), (-1,-1), 6),
+        ("VALIGN",       (0,0), (-1,-1), "MIDDLE"),
+        ("ALIGN",        (0,0), (0,-1),  "CENTER"),
+        ("ALIGN",        (2,0), (2,-1),  "CENTER"),
+    ]
+    svc_tbl.setStyle(TableStyle(svc_cmds))
+    story.append(svc_tbl)
+
+    # ── MÉTRICAS RAW ──────────────────────────────────────────
+    story.append(Paragraph("DETALLE DE MÉTRICAS CUANTITATIVAS", S_LABEL))
+
     KEYS = [
         ("laplaciano", "Var. Laplaciano", False),
         ("contraste",  "Contraste RMS",   False),
@@ -661,59 +1019,151 @@ def reporte_txt(m, m_corr, dx, dx_final_str, nombre):
         ("kurtosis",   "Kurtosis",        True),
         ("px_oscuros", "Px. oscuros (%)", True),
     ]
-    lineas = [
-        "═" * 58,
-        "  REPORTE DE CALIDAD — RADIOGRAFÍA DE TÓRAX",
-        "═" * 58,
-        f"  Archivo : {nombre}",
-        f"  Fecha   : {ts}",
-        "",
-        "─" * 58,
-        "  DIAGNÓSTICO",
-        "─" * 58,
-    ]
 
-    if dx["sobrex"]:
-        lineas.append(f"  Sobreexposición : {dx['sobrex']['severidad']}")
-        lineas.append(f"  Criterios       : {' | '.join(dx['sobrex']['criterios'])}")
-        p = dx["sobrex"]["params"]
-        lineas.append(f"  Corrección      : Gamma={p['gamma']} · CLAHE clip={p['clahe_clip']}")
-    else:
-        lineas.append("  Sobreexposición : no detectada")
-
-    if dx["blur"]:
-        lineas.append(f"  Blur            : {dx['blur']['severidad']}")
-        lineas.append(f"  Criterios       : {' | '.join(dx['blur']['criterios'])}")
-        p = dx["blur"]["params"]
-        lineas.append(f"  Corrección      : {p['metodo']}")
-    else:
-        lineas.append("  Blur            : no detectado")
-
-    lineas += ["", "─" * 58, "  MÉTRICAS", "─" * 58]
+    def th(txt):
+        return Paragraph(txt, st("rth", fontName="Helvetica-Bold", fontSize=8,
+                                 textColor=BLANCO, leading=10))
+    def td(txt, bold=False, col=None):
+        return Paragraph(txt, st("rtd", fontSize=8.5,
+                                 fontName="Helvetica-Bold" if bold else "Helvetica",
+                                 textColor=col or GRIS_TEXTO,
+                                 leading=11, alignment=TA_CENTER))
+    def tdl(txt):
+        return Paragraph(txt, st("rtdl", fontSize=8.5, textColor=colors.HexColor("#1a2332"),
+                                 leading=11))
 
     if m_corr:
-        lineas.append(f"  {'Métrica':<20} {'Original':>10} {'Corregida':>10} {'Δ':>8}")
-        lineas.append("  " + "─" * 50)
-        for key, label, _ in KEYS:
-            d = m_corr[key] - m[key]
-            lineas.append(f"  {label:<20} {m[key]:>10.4f} {m_corr[key]:>10.4f} {'+' if d>=0 else ''}{d:>7.4f}")
+        raw_header = [th("Métrica"), th("Original"), th("Corregida"), th("Δ")]
+        raw_rows   = [raw_header]
+        for key, label, inv in KEYS:
+            orig  = m[key]; corr = m_corr[key]; delta = corr - orig
+            mej   = (delta < 0) if inv else (delta >= 0)
+            sign  = "+" if delta >= 0 else ""
+            col   = VERDE if mej else ROJO
+            raw_rows.append([
+                tdl(label),
+                td(f"{orig:.4f}"),
+                td(f"{corr:.4f}"),
+                td(f"{sign}{delta:.4f}", bold=True, col=col),
+            ])
+        raw_cw = [W*0.30, W*0.23, W*0.23, W*0.24]
     else:
-        lineas.append(f"  {'Métrica':<20} {'Valor':>10}")
-        lineas.append("  " + "─" * 32)
+        raw_header = [th("Métrica"), th("Valor")]
+        raw_rows   = [raw_header]
         for key, label, _ in KEYS:
-            lineas.append(f"  {label:<20} {m[key]:>10.4f}")
+            raw_rows.append([tdl(label), td(f"{m[key]:.4f}")])
+        raw_cw = [W*0.55, W*0.45]
 
-    lineas += [
-        "",
-        "─" * 58,
-        "  DECISIÓN FINAL",
-        "─" * 58,
-        f"  {dx_final_str}",
-        "",
-        "═" * 58,
+    raw_tbl = Table(raw_rows, colWidths=raw_cw)
+    raw_tbl.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0), (-1,0),  AZUL),
+        ("ROWBACKGROUNDS",(0,1),(-1,-1),  [BLANCO, FILA_ALT]),
+        ("GRID",          (0,0), (-1,-1), 0.4, GRIS_BORDE),
+        ("LEFTPADDING",   (0,0), (-1,-1), 7),
+        ("RIGHTPADDING",  (0,0), (-1,-1), 7),
+        ("TOPPADDING",    (0,0), (-1,-1), 4),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+        ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
+        ("ALIGN",         (1,0), (-1,-1), "CENTER"),
+    ]))
+    story.append(raw_tbl)
+
+    # ── BLOQUE 4: HISTOGRAMAS ─────────────────────────────────
+    story.append(Paragraph("DISTRIBUCIÓN DE INTENSIDADES", S_LABEL))
+
+    HW = (W - 6*mm) / 2
+    HH = HW * 0.52
+
+    rl_h_orig = hist_rl(img_pre,  "#378ADD", "Histograma — Original",  HW, HH)
+    rl_h_corr = hist_rl(img_corr, "#1d9e75", "Histograma — Corregida", HW, HH) \
+                if img_corr is not None else \
+                Paragraph("Sin corrección", S_CENTER)
+
+    hist_row = Table([[rl_h_orig, rl_h_corr]],
+                     colWidths=[HW, HW])
+    hist_row.setStyle(TableStyle([
+        ("BOX",         (0,0), (0,0), 0.4, GRIS_BORDE),
+        ("BOX",         (1,0), (1,0), 0.4, GRIS_BORDE),
+        ("LEFTPADDING", (0,0), (-1,-1), 0),
+        ("RIGHTPADDING",(0,0), (-1,-1), 0),
+        ("COLPADDING",  (0,0), (-1,-1), 3),
+        ("ALIGN",       (0,0), (-1,-1), "CENTER"),
+        ("VALIGN",      (0,0), (-1,-1), "MIDDLE"),
+    ]))
+    story.append(hist_row)
+    story.append(Paragraph(
+        "Distribución de intensidades antes y después de la corrección · "
+        "línea discontinua = umbral de sobreexposición (160)",
+        st("hcap", fontSize=7.5, textColor=GRIS_LABEL,
+           alignment=TA_CENTER, leading=10, spaceBefore=3)
+    ))
+
+    # ── BLOQUE 5: DECISIÓN FINAL ──────────────────────────────
+    story.append(Paragraph("DECISIÓN FINAL", S_LABEL))
+
+    es_apta    = "DEGRADADA" not in dx_final_str
+    dec_color  = VERDE       if es_apta else ROJO
+    dec_bg     = colors.HexColor("#f0f8f3") if es_apta else ROJO_FONDO
+    dec_border = VERDE_BORDE if es_apta else ROJO_BORDE
+    dec_tag    = "APTO"      if es_apta else "NO APTO"
+    conclusion = (
+        "La corrección técnica aplicada ha resultado en una mejora significativa y uniforme "
+        "en la calidad de la imagen, permitiendo una visualización nítida y detallada de la "
+        "vasculatura pulmonar y los contornos óseos." if es_apta else
+        "La imagen presenta artefactos que comprometen la aptitud diagnóstica. "
+        "Se recomienda revisión manual y, de ser posible, repetir el estudio."
+    )
+
+    dec_rows = [
+        [Paragraph(
+            f"El estudio es <b>{dec_tag}</b> para diagnóstico clínico inicial",
+            st("dectit", fontName="Helvetica-Bold", fontSize=13,
+               textColor=dec_color, alignment=TA_CENTER, leading=17)
+        )],
+        [Paragraph(conclusion,
+                   st("decbod", fontSize=9, textColor=GRIS_TEXTO,
+                      alignment=TA_CENTER, leading=14))],
     ]
-    return "\n".join(lineas)
+    dec_tbl = Table(dec_rows, colWidths=[W])
+    dec_tbl.setStyle(TableStyle([
+        ("BACKGROUND",   (0,0), (-1,-1), dec_bg),
+        ("BOX",          (0,0), (-1,-1), 1.5, dec_border),
+        ("LEFTPADDING",  (0,0), (-1,-1), 16),
+        ("RIGHTPADDING", (0,0), (-1,-1), 16),
+        ("TOPPADDING",   (0,0), (0,0),   12),
+        ("BOTTOMPADDING",(0,0), (0,0),   4),
+        ("TOPPADDING",   (0,1), (0,1),   0),
+        ("BOTTOMPADDING",(0,1), (0,1),   12),
+        ("ALIGN",        (0,0), (-1,-1), "CENTER"),
+    ]))
+    story.append(dec_tbl)
 
+    # ── FOOTER ────────────────────────────────────────────────
+    story.append(Spacer(1, 6*mm))
+    story.append(HRFlowable(width="100%", thickness=0.5,
+                             color=GRIS_BORDE, spaceAfter=4))
+
+    footer_data = [[
+        Paragraph(f"Generado por RX Tórax v3 · UTB Bioingeniería · {ts}",
+                  st("fl", fontSize=7.5, textColor=colors.HexColor("#a0b0c4"),
+                     leading=10)),
+        Paragraph(
+            dec_tag,
+            st("ft", fontSize=7.5, fontName="Helvetica-Bold",
+               textColor=dec_color, alignment=TA_RIGHT, leading=10)
+        ),
+    ]]
+    ft = Table(footer_data, colWidths=[W * 0.75, W * 0.25])
+    ft.setStyle(TableStyle([
+        ("LEFTPADDING",  (0,0), (-1,-1), 0),
+        ("RIGHTPADDING", (0,0), (-1,-1), 0),
+        ("VALIGN",       (0,0), (-1,-1), "MIDDLE"),
+    ]))
+    story.append(ft)
+
+    doc.build(story)
+    buf.seek(0)
+    return buf
 
 # ═══════════════════════════════════════════════════════════════
 #  STREAMLIT — CONFIGURACIÓN
@@ -829,22 +1279,24 @@ if archivo and analizar:
 # ═══════════════════════════════════════════════════════════════
 
 if exportar and st.session_state.ok:
-    m      = st.session_state.m
-    m_corr = st.session_state.m_corr
-    dx     = st.session_state.dx
-    nombre = st.session_state.nombre
-    dx_str = "APTA PARA DIAGNÓSTICO" if not (dx["sobrex"] or dx["blur"]) else dx["final"]
-    if m_corr:
-        dx_final_m = clasificar(m_corr)
-        dx_str_fin = dx_final_m["final"]
-    else:
-        dx_str_fin = dx_str
-    txt = reporte_txt(m, m_corr, dx, dx_str_fin, nombre)
+    m        = st.session_state.m
+    m_corr   = st.session_state.m_corr
+    dx       = st.session_state.dx
+    nombre   = st.session_state.nombre
+    img_pre  = st.session_state.img_pre
+    img_corr = st.session_state.img_corr
+
+    dx_str = dx["final"] if (dx["sobrex"] or dx["blur"]) else "APTA PARA DIAGNÓSTICO"
+    dx_fin = clasificar(m_corr)["final"] if m_corr else dx_str
+
+    with st.spinner("Generando PDF..."):
+        pdf_buf = generar_reporte_pdf(m, m_corr, dx, dx_fin, nombre, img_pre, img_corr)
+
     st.sidebar.download_button(
-        "📄 Descargar reporte",
-        txt.encode("utf-8"),
-        f"reporte_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-        "text/plain",
+        "📄 Descargar reporte PDF",
+        pdf_buf,
+        f"reporte_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+        "application/pdf",
         use_container_width=True,
     )
 
@@ -949,12 +1401,11 @@ else:
     st.markdown("---")
 
     # ── Pestañas principales ──────────────────────────────────
-    tab_img, tab_hist, tab_met, tab_rep = st.tabs([
+    tab_img, tab_hist, tab_met = st.tabs([
         "🖼 Comparación visual",
         "📊 Histograma",
         "📋 Métricas detalladas",
-        "📄 Reporte",
-    ])
+        ])
 
     # ── Tab 1: Imágenes ───────────────────────────────────────
     with tab_img:
@@ -1078,16 +1529,3 @@ else:
                 <div class="crit-detail">{'Todas las métricas están dentro del rango aceptable tras la corrección.' if apta_post else 'Algunas métricas siguen fuera del rango. Revisar imagen manualmente.'}</div>
             </div>""", unsafe_allow_html=True)
 
-    # ── Tab 4: Reporte ────────────────────────────────────────
-    with tab_rep:
-        dx_str = dx["final"] if (tiene_sobrex or tiene_blur) else "APTA PARA DIAGNÓSTICO"
-        dx_fin = clasificar(m_corr)["final"] if m_corr else dx_str
-        txt    = reporte_txt(m, m_corr, dx, dx_fin, nombre)
-        st.code(txt, language=None)
-        st.download_button(
-            "⬇ Descargar reporte (.txt)",
-            txt.encode("utf-8"),
-            f"reporte_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-            "text/plain",
-        )
- 
